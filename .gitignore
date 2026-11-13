@@ -54,6 +54,8 @@ dkms.conf
 # debug information files
 *.dwo
 
-
+flashnet.bat
+flashapp.bat
 settings.json
 build
+build_net
