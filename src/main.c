@@ -1,32 +1,43 @@
-/*
- * Zephyr BLE peripheral exposing the Environmental Sensing Service (0x181A)
- * with Temperature, Humidity and Pressure characteristics (read + notify).
- */
+#include <zephyr/types.h>
+#include <stddef.h>
+#include <string.h>
+#include <errno.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/conn.h>
-#include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
+#include <zephyr/bluetooth/gatt.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/drivers/gpio.h>
 
 LOG_MODULE_REGISTER(ess, LOG_LEVEL_INF);
 
-static ssize_t read_co2(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-			 void *buf, uint16_t len, uint16_t off)
-{
+#define LED_NODE DT_ALIAS(led0)
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
 
+/* CO2 concentration in ppm */
+static uint16_t co2_ppm;
+
+
+static ssize_t read_co2(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+			void *buf, uint16_t len, uint16_t off)
+{
+	uint16_t value = sys_cpu_to_le16(co2_ppm);
+
+	return bt_gatt_attr_read(conn, attr, buf, len, off, &value, sizeof(value));
 }
 
- BT_GATT_SERVICE_DEFINE(ess_svc,
+BT_GATT_SERVICE_DEFINE(ess_svc,
 	BT_GATT_PRIMARY_SERVICE(BT_UUID_ESS),
-
-	BT_GATT_CHARACTERISTIC(BT_UUID_TEMPERATURE,
-			       BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
-			       BT_GATT_PERM_READ, read_temp, NULL, NULL),
-	BT_GATT_CCC(ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
-
+	BT_GATT_CHARACTERISTIC(BT_UUID_GATT_CO2CONC,
+			       BT_GATT_CHRC_READ,
+			       BT_GATT_PERM_READ,
+			       read_co2, NULL, NULL)
 );
+
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -34,31 +45,34 @@ static const struct bt_data ad[] = {
 };
 
 static const struct bt_data sd[] = {
-	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME,
+		sizeof(CONFIG_BT_DEVICE_NAME) - 1),
 };
 
 static void start_adv(void)
 {
-	int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
-
+	int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
+				  sd, ARRAY_SIZE(sd));
 	if (err) {
 		LOG_ERR("Advertising failed (%d)", err);
-	} else {
-		LOG_INF("Advertising");
+		return;
 	}
+	LOG_INF("Advertising");
 }
-
 static void connected(struct bt_conn *conn, uint8_t err)
 {
-	LOG_INF("Connected %s", err ? "FAILED" : "OK");
+	if (err) {
+		LOG_ERR("Connection failed (0x%02x)", err);
+		return;
+	}
+	LOG_INF("Connected");
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-	LOG_INF("Disconnected (reason 0x%02x)", reason);
+	LOG_INF("Disconnected (0x%02x)", reason);
 }
 
-/* Restart advertising once the connection object is fully released */
 static void recycled(void)
 {
 	start_adv();
@@ -72,20 +86,36 @@ BT_CONN_CB_DEFINE(conn_cb) = {
 
 int main(void)
 {
-	int err = bt_enable(NULL);
+	int err;
 
+	if (!gpio_is_ready_dt(&led)) {
+		LOG_ERR("LED not ready");
+		return 0;
+	}
+
+	err = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+	if (err) {
+		LOG_ERR("LED configure failed (%d)", err);
+		return 0;
+	}
+
+	err = bt_enable(NULL);
 	if (err) {
 		LOG_ERR("bt_enable failed (%d)", err);
 		return 0;
 	}
 
+	if (IS_ENABLED(CONFIG_SETTINGS)) {
+		settings_load();
+	}
+
 	start_adv();
 
 	while (1) {
-		k_sleep(K_SECONDS(2));
-		sample_sensors();
-
-		bt_gatt_notify_uuid(NULL, BT_UUID_, ess_svc.attrs, &p, sizeof(p));
+		/* TODO: read the real sensor and update co2_ppm */
+		/* TODO: LED indication (blink, etc.) */
+		k_msleep(1000);
 	}
+
 	return 0;
 }
